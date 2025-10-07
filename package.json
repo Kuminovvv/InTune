@@ -1,0 +1,9 @@
+{
+  "name": "interview-copilot",
+  "private": true,
+  "workspaces": ["app/electron"],
+  "scripts": {
+    "dev": "npm --prefix app/electron run dev",
+    "build": "npm --prefix app/electron run build"
+  }
+}
