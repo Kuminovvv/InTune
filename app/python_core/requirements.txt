@@ -1,0 +1,11 @@
+aiofiles
+sounddevice
+numpy
+webrtcvad
+faster-whisper
+sentence-transformers
+faiss-cpu
+httpx
+websockets
+pypdf
+python-docx
