@@ -79,15 +79,32 @@ class KnowledgeStore:
         embeddings = self.model.encode([chunk.text for chunk in chunks])
         ids: List[int] = []
         with sqlite3.connect(self._db_path) as conn:
-            cursor = conn.executemany(
-                "INSERT INTO documents (text, source_path, profile, section) VALUES (?, ?, ?, ?)",
-                [(chunk.text, chunk.source_path, chunk.profile, chunk.section) for chunk in chunks],
-            )
+            conn.execute("BEGIN")
+            for chunk in chunks:
+                cursor = conn.execute(
+                    "INSERT INTO documents (text, source_path, profile, section) VALUES (?, ?, ?, ?)",
+                    (chunk.text, chunk.source_path, chunk.profile, chunk.section),
+                )
+                ids.append(int(cursor.lastrowid))
             conn.commit()
-            ids.extend(range(cursor.lastrowid - len(chunks) + 1, cursor.lastrowid + 1))
+        if not ids:
+            return
         index = self.index
-        index.add_with_ids(np.asarray(embeddings, dtype=np.float32), np.asarray(ids, dtype=np.int64))
+        index.add_with_ids(
+            np.asarray(embeddings, dtype=np.float32),
+            np.asarray(ids, dtype=np.int64),
+        )
         faiss.write_index(index, str(self._index_path))
+
+    def replace_all(self, chunks: Sequence[DocumentChunk]) -> None:
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute("DELETE FROM documents")
+            conn.commit()
+        self.reset_index()
+        if not chunks:
+            faiss.write_index(self.index, str(self._index_path))
+            return
+        self.add_documents(chunks)
 
     def rebuild_index(self) -> None:
         with sqlite3.connect(self._db_path) as conn:

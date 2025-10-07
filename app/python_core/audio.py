@@ -1,4 +1,4 @@
-"""Audio capture utilities built on top of sounddevice."""
+"""Audio capture utilities for Interview Copilot."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import platform
 import queue
 import threading
 import time
@@ -40,17 +41,24 @@ DevicePredicate = Callable[[dict], bool]
 def list_output_devices(predicate: Optional[DevicePredicate] = None) -> List[str]:
     """Return device names that are suitable for loopback capture."""
 
-    devices = []
+    devices: List[str] = []
+    host_apis = sd.query_hostapis()
     for device in sd.query_devices():
-        name = device.get("name", "")
-        host = sd.query_hostapis()[device.get("hostapi", 0)].get("name", "")
-        loopback = "loopback" in name.lower()
-        is_output = device.get("max_output_channels", 0) > 0
         if predicate and not predicate(device):
             continue
-        if loopback or (host.lower().startswith("wasapi") and is_output):
+        max_output = device.get("max_output_channels", 0)
+        if max_output <= 0:
+            continue
+        name = device.get("name", "")
+        host_name = host_apis[device.get("hostapi", 0)].get("name", "")
+        if "loopback" in name.lower():
             devices.append(name)
-    return sorted(set(devices))
+            continue
+        if platform.system().lower() == "windows" and host_name.lower().startswith("wasapi"):
+            devices.append(name)
+        elif platform.system().lower() != "windows":
+            devices.append(name)
+    return sorted(dict.fromkeys(devices))
 
 
 @dataclass(slots=True)
@@ -63,6 +71,7 @@ class AudioConfig:
     channels: int = 1
     dtype: str = "int16"
     auto_reconnect: bool = True
+    monitor_interval: float = 1.0
 
     @property
     def block_size(self) -> int:
@@ -74,52 +83,155 @@ class AudioCapturer:
 
     def __init__(self, config: AudioConfig):
         self._config = config
-        self._queue: "queue.Queue[CapturedFrame]" = queue.Queue(maxsize=32)
+        self._queue: "queue.Queue[Optional[CapturedFrame]]" = queue.Queue(maxsize=64)
         self._stream: Optional[sd.RawInputStream] = None
         self._lock = threading.Lock()
-        self._stop_event = threading.Event()
-        self._device_index: Optional[int] = None
+        self._shutdown = threading.Event()
+        self._monitor_stop = threading.Event()
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._active_device_signature: Optional[str] = None
+        self._last_default_signature: Optional[str] = self._current_default_output_signature()
 
     @property
     def config(self) -> AudioConfig:
         return self._config
 
+    def _extra_settings(self) -> Optional[sd.WasapiSettings]:  # type: ignore[name-defined]
+        if platform.system().lower() != "windows":
+            return None
+        try:
+            return sd.WasapiSettings(loopback=True)  # type: ignore[attr-defined]
+        except AttributeError:
+            logger.debug("sounddevice.WasapiSettings is not available; falling back to default settings")
+            return None
+
+    def _device_signature(self, device_index: Optional[int]) -> Optional[str]:
+        if device_index is None:
+            return self._current_default_output_signature()
+        try:
+            info = sd.query_devices(device_index)
+        except Exception:  # noqa: BLE001
+            return None
+        host = sd.query_hostapis()[info.get("hostapi", 0)].get("name", "")
+        return f"{info.get('name', 'unknown')}|{host}"
+
+    def _current_default_output_signature(self) -> Optional[str]:
+        try:
+            info = sd.query_devices(None, "output")
+        except Exception:  # noqa: BLE001
+            return None
+        host = sd.query_hostapis()[info.get("hostapi", 0)].get("name", "")
+        return f"{info.get('name', 'default')}|{host}"
+
     def _resolve_device_index(self) -> Optional[int]:
         if self._config.device_name == "System Default":
-            return None
+            try:
+                default_info = sd.query_devices(None, "output")
+            except Exception:  # noqa: BLE001
+                default_info = None
+            if default_info:
+                default_name = default_info.get("name")
+                for idx, device in enumerate(sd.query_devices()):
+                    if device.get("name") == default_name:
+                        return idx
+            output_index = sd.default.device[1]
+            if output_index is None or output_index < 0:
+                return None
+            return int(output_index)
         for idx, device in enumerate(sd.query_devices()):
             if device.get("name") == self._config.device_name:
                 return idx
-        logger.warning("Requested device '%s' not found, falling back to default", self._config.device_name)
+        logger.warning("Requested device '%s' not found, falling back to system default", self._config.device_name)
         return None
+
+    def _open_stream(self) -> None:
+        extra = self._extra_settings()
+        device_index = self._resolve_device_index()
+        self._active_device_signature = self._device_signature(device_index)
+        logger.info("Starting audio capture from %s", self._active_device_signature or "System Default")
+        self._stream = sd.RawInputStream(
+            samplerate=self._config.sample_rate,
+            blocksize=self._config.block_size,
+            device=device_index,
+            channels=self._config.channels,
+            dtype=self._config.dtype,
+            callback=self._on_audio,
+            finished_callback=self._on_stream_finished,
+            extra_settings=extra,
+        )
+        self._stream.start()
+
+    def _close_stream(self) -> None:
+        if self._stream is None:
+            return
+        try:
+            self._stream.stop()
+        finally:
+            self._stream.close()
+            self._stream = None
 
     def start(self) -> None:
         with self._lock:
             if self._stream is not None:
                 return
-            self._device_index = self._resolve_device_index()
-            logger.info("Starting audio capture from %s", self._config.device_name)
-            self._stop_event.clear()
-            self._stream = sd.RawInputStream(
-                samplerate=self._config.sample_rate,
-                blocksize=self._config.block_size,
-                device=self._device_index,
-                channels=self._config.channels,
-                dtype=self._config.dtype,
-                callback=self._on_audio,
-                finished_callback=self._on_stop,
-            )
-            self._stream.start()
+            self._shutdown.clear()
+            self._queue = queue.Queue(maxsize=64)
+            self._open_stream()
+            self._start_monitor_if_needed()
 
     def stop(self) -> None:
         with self._lock:
+            if self._stream is None and not self._monitor_thread:
+                return
+            self._shutdown.set()
+            self._stop_monitor()
+            self._close_stream()
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def reconnect(self) -> None:
+        with self._lock:
             if self._stream is None:
                 return
-            logger.info("Stopping audio capture")
-            self._stop_event.set()
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+            logger.info("Reinitialising audio capture stream after device change")
+            self._close_stream()
+            try:
+                self._open_stream()
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to restart audio stream")
+                raise
+
+    def _start_monitor_if_needed(self) -> None:
+        if not self._config.auto_reconnect or self._config.device_name != "System Default":
+            return
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            return
+        self._monitor_stop.clear()
+        self._monitor_thread = threading.Thread(target=self._monitor_loop, name="audio-monitor", daemon=True)
+        self._monitor_thread.start()
+
+    def _stop_monitor(self) -> None:
+        if not self._monitor_thread:
+            return
+        self._monitor_stop.set()
+        self._monitor_thread.join(timeout=1.0)
+        self._monitor_thread = None
+        self._monitor_stop.clear()
+
+    def _monitor_loop(self) -> None:
+        self._last_default_signature = self._current_default_output_signature()
+        while not self._monitor_stop.wait(self._config.monitor_interval):
+            current = self._current_default_output_signature()
+            if not current or current == self._last_default_signature:
+                continue
+            logger.info("Detected default output change: %s -> %s", self._last_default_signature, current)
+            self._last_default_signature = current
+            try:
+                self.reconnect()
+            except Exception:  # noqa: BLE001
+                logger.exception("Auto-reconnect failed")
 
     def _on_audio(self, indata: bytes, frames: int, _time: sd.CallbackFlags, status: sd.CallbackFlags) -> None:  # type: ignore[override]
         if status:
@@ -128,41 +240,63 @@ class AudioCapturer:
         try:
             self._queue.put_nowait(frame)
         except queue.Full:
-            logger.warning("Audio frame queue overflow, dropping frame")
+            try:
+                _ = self._queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._queue.put_nowait(frame)
+            except queue.Full:
+                logger.warning("Audio frame queue overflow; dropping frame")
 
-    def _on_stop(self) -> None:
+    def _on_stream_finished(self) -> None:
         logger.debug("Audio stream finished")
 
     async def frames(self) -> AsyncIterator[CapturedFrame]:
         loop = asyncio.get_running_loop()
-        while not self._stop_event.is_set():
-            frame = await loop.run_in_executor(None, self._queue.get)
-            yield frame
+        while not self._shutdown.is_set():
+            item = await loop.run_in_executor(None, self._queue.get)
+            if item is None:
+                if self._shutdown.is_set():
+                    break
+                continue
+            yield item
 
-    def test_capture(self, duration: float = 2.0) -> List[AudioMetrics]:
+    def test_capture(self, duration: float = 2.0, *, play_tone: bool = True) -> List[AudioMetrics]:
         """Measure RMS/peak levels for the specified duration."""
 
         frames: List[AudioMetrics] = []
-        deadline = time.monotonic() + duration
+        block_size = self._config.block_size
+        extra = self._extra_settings()
+        device_index = self._resolve_device_index()
+        start_time = time.monotonic()
         with contextlib.ExitStack() as stack:
-            device_index = self._resolve_device_index()
             stream = stack.enter_context(
-                sd.InputStream(
+                sd.RawInputStream(
                     samplerate=self._config.sample_rate,
-                    blocksize=self._config.block_size,
+                    blocksize=block_size,
                     device=device_index,
                     channels=self._config.channels,
                     dtype=self._config.dtype,
+                    extra_settings=extra,
                 )
             )
-            while time.monotonic() < deadline:
-                data, _ = stream.read(self._config.block_size)
-                arr = np.frombuffer(data, dtype=np.int16)
-                if arr.size == 0:
-                    continue
-                rms = float(np.sqrt(np.mean(np.square(arr)))) / 32768.0
-                peak = float(np.max(np.abs(arr))) / 32768.0
-                frames.append(AudioMetrics(rms=rms, peak=peak))
+            stream.start()
+            if play_tone:
+                tone = self.generate_test_tone(duration=duration)
+                sd.play(tone, samplerate=self._config.sample_rate, blocking=False)
+            try:
+                while time.monotonic() - start_time < duration:
+                    data, _ = stream.read(block_size)
+                    array = np.frombuffer(data, dtype=np.int16)
+                    if array.size == 0:
+                        continue
+                    rms = float(np.sqrt(np.mean(np.square(array.astype(np.float32))))) / 32768.0
+                    peak = float(np.max(np.abs(array))) / 32768.0
+                    frames.append(AudioMetrics(rms=rms, peak=peak))
+            finally:
+                if play_tone:
+                    sd.stop()
         return frames
 
     def generate_test_tone(self, frequency: float = 440.0, duration: float = 1.0) -> np.ndarray:
@@ -171,13 +305,6 @@ class AudioCapturer:
         t = np.linspace(0, duration, int(self._config.sample_rate * duration), False)
         tone = 0.2 * np.sin(2 * math.pi * frequency * t)
         return tone.astype(np.float32)
-
-    def reconnect(self) -> None:
-        """Reconnect to the audio device, used when Windows changes defaults."""
-
-        logger.info("Reconnecting audio capture stream")
-        self.stop()
-        self.start()
 
 
 __all__ = [

@@ -26,6 +26,7 @@ class AudioSettings:
     sample_rate: int = 16_000
     block_ms: int = 20
     channels: int = 1
+    monitor_interval: float = 1.0
 
 
 @dataclass(slots=True)
@@ -72,7 +73,7 @@ class RagSettings:
     top_k: int = 5
     db_path: Path = Path("./data/knowledge.db")
     index_path: Path = Path("./data/index.faiss")
-    embed_model: str = "BAAI/bge-small-ru-en-v1.5"
+    embed_model: str = "bge-small-ru-en"
 
 
 @dataclass(slots=True)
@@ -110,7 +111,7 @@ class AppConfig:
             top_k=rag_data.get("top_k", 5),
             db_path=_resolve_path(rag_data.get("db_path"), base=base) or Path("./data/knowledge.db"),
             index_path=_resolve_path(rag_data.get("index_path"), base=base) or Path("./data/index.faiss"),
-            embed_model=rag_data.get("embed_model", "BAAI/bge-small-ru-en-v1.5"),
+            embed_model=rag_data.get("embed_model", "bge-small-ru-en"),
         )
 
         logging_data = payload.get("logging", {})

@@ -29,6 +29,7 @@ class SpeechToTextEngine:
         self._config = config
         device = "cuda" if config.use_gpu else "cpu"
         self._model = WhisperModel(config.model, device=device, compute_type="float16" if config.use_gpu else "int8")
+        self._lock = asyncio.Lock()
 
     @property
     def model_name(self) -> str:
@@ -37,21 +38,26 @@ class SpeechToTextEngine:
     async def transcribe(self, pcm16: bytes, sample_rate: int) -> str:
         """Transcribe a PCM16 buffer into text."""
 
+        if not pcm16:
+            return ""
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: list(
-                self._model.transcribe(
-                    np.frombuffer(pcm16, np.int16),
-                    beam_size=self._config.beam_size,
-                    language=None if self._config.language == "auto" else self._config.language,
-                    vad_filter=self._config.vad_filter,
-                    temperature=0.0,
-                    compression_ratio_threshold=2.4,
-                    log_prob_threshold=-1.0,
-                )
-            ),
-        )
+        async with self._lock:
+            result = await loop.run_in_executor(
+                None,
+                lambda: list(
+                    self._model.transcribe(
+                        np.frombuffer(pcm16, np.int16),
+                        sample_rate=sample_rate,
+                        beam_size=self._config.beam_size,
+                        language=None if self._config.language == "auto" else self._config.language,
+                        vad_filter=self._config.vad_filter,
+                        temperature=0.0,
+                        compression_ratio_threshold=2.4,
+                        log_prob_threshold=-1.0,
+                        initial_prompt=None,
+                    )
+                ),
+            )
         if not result:
             return ""
         transcript = " ".join(segment.text.strip() for segment in result if segment.text)
