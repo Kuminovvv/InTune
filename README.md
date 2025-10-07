@@ -18,32 +18,14 @@ package.json        # npm workspaces (корневая точка входа)
 ## Быстрый старт
 
 1. Установите Python 3.10+ и Node.js 18+.
-2. Создайте и активируйте виртуальное окружение Python.
-3. Установите зависимости Python-core:
+2. Убедитесь, что установлен [Ollama](https://ollama.com/) и загружена модель `qwen2.5:7b-instruct` (однократно выполните `ollama run qwen2.5:7b-instruct`).
+3. Запустите скрипт автоматического старта:
 
    ```bash
-   pip install -r app/python_core/requirements.txt
+   python start.py
    ```
 
-4. Установите зависимости Electron UI (npm workspaces):
-
-   ```bash
-   npm install
-   ```
-
-5. Убедитесь, что установлен [Ollama](https://ollama.com/) и скачана модель `qwen2.5:7b-instruct`:
-
-   ```bash
-   ollama run qwen2.5:7b-instruct
-   ```
-
-6. Запустите приложение (Python-core + Electron UI) **одной командой** из корня репозитория:
-
-   ```bash
-   npm run dev
-   ```
-
-   Скрипт поднимет Vite dev-server, запустит Electron и автоматически стартует Python-core. UI подключается к `ws://127.0.0.1:8765` и управляет пайплайном через JSON-протокол.
+   Скрипт создаст виртуальное окружение `.venv`, установит Python- и npm-зависимости и затем вызовет `npm run dev`, который поднимет Vite dev-server, запустит Electron и автоматически стартует Python-core. UI подключается к `ws://127.0.0.1:8765` и управляет пайплайном через JSON-протокол.
 
 ## Возможности
 
