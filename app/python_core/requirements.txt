@@ -9,3 +9,5 @@ httpx
 websockets
 pypdf
 python-docx
+PySide6
+keyboard
