@@ -42,7 +42,7 @@ class SttSettings:
     """Speech-to-text settings."""
 
     model: str = "medium"
-    use_gpu: bool = True
+    use_gpu: bool = False
     language: str = "auto"
 
 

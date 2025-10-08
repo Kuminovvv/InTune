@@ -2,7 +2,7 @@
   "language": "ru",
   "vad": { "aggressiveness": 2, "silence_sec": 0.8 },
   "audio": { "device_name": "System Default", "auto_reconnect": true, "sample_rate": 16000, "block_ms": 20, "channels": 1, "monitor_interval": 1.0 },
-  "stt": { "model": "medium", "use_gpu": true, "language": "auto" },
+  "stt": { "model": "medium", "use_gpu": false, "language": "auto" },
   "ollama": { "model": "qwen2.5:7b-instruct", "timeout_sec": 120, "host": "http://127.0.0.1:11434" },
   "overlay": { "x": 20, "y": 20, "width": 640, "height": 180, "opacity": 1 },
   "rag": { "top_k": 5, "db_path": "./data/knowledge.db", "index_path": "./data/index.faiss", "embed_model": "bge-small-ru-en" },

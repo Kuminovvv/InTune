@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class SttConfig:
     model: str = "medium"
-    use_gpu: bool = True
+    use_gpu: bool = False
     language: str = "auto"
     beam_size: int = 5
     vad_filter: bool = True
