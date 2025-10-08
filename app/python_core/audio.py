@@ -44,22 +44,34 @@ def list_output_devices(predicate: Optional[DevicePredicate] = None) -> List[str
     devices: List[str] = []
     host_apis = sd.query_hostapis()
     is_windows = platform.system().lower() == "windows"
-    for device in sd.query_devices():
+    for index, device in enumerate(sd.query_devices()):
         if predicate and not predicate(device):
             continue
         max_output = int(device.get("max_output_channels", 0) or 0)
         if max_output <= 0:
             continue
+
         name = device.get("name", "")
         host_name = host_apis[device.get("hostapi", 0)].get("name", "")
-        if "loopback" in name.lower():
+        normalized_name = name.lower()
+
+        if "loopback" in normalized_name:
             devices.append(name)
             continue
+
         if is_windows:
-            if "wasapi" in host_name.lower():
-                devices.append(name)
-        else:
-            devices.append(name)
+            if "wasapi" not in host_name.lower():
+                continue
+            try:
+                input_info = sd.query_devices(index, "input")
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to inspect WASAPI loopback channels", exc_info=True)
+                continue
+            max_input = int(input_info.get("max_input_channels", 0) or 0)
+            if max_input <= 0:
+                logger.debug("Skipping WASAPI device '%s' without loopback channels", name)
+                continue
+        devices.append(name)
     return sorted(dict.fromkeys(devices))
 
 
@@ -167,6 +179,7 @@ class AudioCapturer:
         desired = max(1, self._config.channels)
 
         info: Optional[dict]
+        input_info: Optional[dict] = None
         try:
             if device_index is None:
                 info = sd.query_devices(None, "output")
@@ -178,7 +191,17 @@ class AudioCapturer:
         if not info:
             return [desired]
 
+        try:
+            if device_index is None:
+                input_info = sd.query_devices(None, "input")
+            else:
+                input_info = sd.query_devices(device_index, "input")
+        except Exception:  # noqa: BLE001
+            input_info = None
+
         max_input = int(info.get("max_input_channels", 0) or 0)
+        if input_info is not None:
+            max_input = max(max_input, int(input_info.get("max_input_channels", 0) or 0))
         max_output = int(info.get("max_output_channels", 0) or 0)
 
         options: List[int] = []
@@ -273,6 +296,13 @@ class AudioCapturer:
                 continue
 
             if "wasapi" in host_name.lower():
+                try:
+                    loopback_info = sd.query_devices(idx, "input")
+                except Exception:  # noqa: BLE001
+                    loopback_info = None
+                max_input = int((loopback_info or {}).get("max_input_channels", 0) or 0)
+                if max_input <= 0:
+                    continue
                 if preferred_lower and normalized_name == preferred_lower:
                     wasapi_indices.insert(0, idx)
                 else:
