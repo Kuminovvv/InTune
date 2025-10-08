@@ -11,7 +11,6 @@
 - Интеграция с локальной LLM (llama.cpp) и резервный ответ.
 - Сохранение истории вопросов/ответов в SQLite.
 - Набросок оверлейного UI на PySide6.
-- Поддержка локального шифрования кэша через Fernet.
 
 ## Структура
 
@@ -20,7 +19,7 @@ intune/
   app.py                # bootstrap приложения
   core/                 # конфигурация, пайплайн, события
   domain/               # бизнес-логика (ASR, intents, RAG, LLM)
-  infra/                # реализация IO, хранилище, безопасность
+  infra/                # реализация IO и хранилища
   ui/                   # оверлейное окно (каркас)
   main.py               # CLI для ручного запуска
 ```
@@ -39,7 +38,7 @@ python -m intune.scripts.prepare_and_launch --audio path/to/audio.pcm
 
 Для большинства возможностей требуются дополнительные зависимости:
 
-- `sounddevice`, `faster-whisper`, `llama-cpp-python`, `chromadb`, `PySide6`, `cryptography`, `loguru`
+- `sounddevice`, `faster-whisper`, `llama-cpp-python`, `chromadb`, `PySide6`, `loguru`
 
 При отсутствии `loguru` фреймворк логирования автоматически переключится на стандартный `logging` Python.
 

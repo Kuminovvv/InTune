@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 import json
+import warnings
+from typing import get_args, get_origin
 
 try:
     import yaml  # type: ignore
@@ -65,11 +67,10 @@ class RAGConfig:
 
 @dataclass(slots=True)
 class StorageConfig:
-    """Configuration of local storage and encryption."""
+    """Configuration of local storage."""
 
     sqlite_path: Path = Path("storage/history.sqlite3")
     cache_dir: Path = Path("storage/cache")
-    encryption_key_path: Path = Path("storage/key.bin")
 
 
 @dataclass(slots=True)
@@ -125,15 +126,42 @@ def _load_from_json(path: Path) -> Dict[str, Any]:
         return data
 
 
-def _merge_dataclass(instance: Any, values: Dict[str, Any]) -> None:
+LEGACY_FIELDS: Dict[str, Set[str]] = {
+    "storage": {"encryption_key_path"},
+}
+
+
+def _type_contains_path(annotation: Any) -> bool:
+    if annotation is Path:
+        return True
+    origin = get_origin(annotation)
+    if origin is None:
+        return False
+    return any(_type_contains_path(arg) for arg in get_args(annotation))
+
+
+def _merge_dataclass(instance: Any, values: Dict[str, Any], prefix: str = "") -> None:
+    fields_map = getattr(type(instance), "__dataclass_fields__", {})
     for field_name, field_value in values.items():
-        if not hasattr(instance, field_name):
-            raise ValueError(f"Неизвестный параметр конфигурации: {field_name}")
+        field_info = fields_map.get(field_name)
+        full_name = f"{prefix}.{field_name}" if prefix else field_name
+        if field_info is None:
+            legacy_candidates = LEGACY_FIELDS.get(prefix, set())
+            if field_name in legacy_candidates:
+                warnings.warn(
+                    f"Параметр конфигурации '{full_name}' больше не поддерживается и будет проигнорирован",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                continue
+            raise ValueError(f"Неизвестный параметр конфигурации: {full_name}")
         attr = getattr(instance, field_name)
         if is_dataclass(attr) and isinstance(field_value, dict):
-            _merge_dataclass(attr, field_value)
+            _merge_dataclass(attr, field_value, full_name)
         else:
-            if isinstance(attr, Path):
+            if field_value is not None and (
+                isinstance(attr, Path) or _type_contains_path(field_info.type)
+            ):
                 setattr(instance, field_name, Path(field_value))
             else:
                 setattr(instance, field_name, field_value)

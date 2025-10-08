@@ -25,7 +25,6 @@ OPTIONAL_DEPENDENCIES: Tuple[Tuple[str, str], ...] = (
     ("faster_whisper", "офлайн распознавание речи"),
     ("llama_cpp", "генерация ответов локальной LLM"),
     ("chromadb", "RAG-поиск по базе знаний"),
-    ("cryptography", "локальное шифрование кэша"),
     ("PySide6", "оверлейный интерфейс"),
 )
 
@@ -77,7 +76,6 @@ def _prepare_filesystem(config: AppConfig) -> None:
     rag_index = config.rag.index_path.expanduser()
     cache_dir = config.storage.cache_dir.expanduser()
     sqlite_path = config.storage.sqlite_path.expanduser()
-    key_path = config.storage.encryption_key_path.expanduser()
 
     for directory in (asr_path, llm_path, rag_index, cache_dir):
         if directory.suffix:
@@ -88,14 +86,6 @@ def _prepare_filesystem(config: AppConfig) -> None:
     _ensure_parent(sqlite_path)
     if not sqlite_path.exists():
         sqlite_path.touch()
-
-    _ensure_parent(key_path)
-    try:
-        from intune.infra.security.crypto import SecretBox
-    except Exception:
-        logger.warning("Модуль cryptography недоступен — ключ шифрования не создан")
-    else:
-        SecretBox(key_path)
 
 
 def _ensure_history_schema(config: AppConfig) -> None:
