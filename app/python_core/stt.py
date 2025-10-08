@@ -27,20 +27,33 @@ class SpeechToTextEngine:
 
     def __init__(self, config: SttConfig):
         self._config = config
-        device = "cuda" if config.use_gpu else "cpu"
-        compute_type = "float16" if config.use_gpu else "int8"
+        self._lock = asyncio.Lock()
+        self._model = self._initialise_model(config.use_gpu)
+
+    def _initialise_model(self, use_gpu: bool) -> WhisperModel:
+        """Create a Whisper model, falling back to CPU if GPU init fails."""
+
+        device = "cuda" if use_gpu else "cpu"
+        compute_type = "float16" if use_gpu else "int8"
         try:
-            self._model = WhisperModel(config.model, device=device, compute_type=compute_type)
+            return WhisperModel(self._config.model, device=device, compute_type=compute_type)
         except Exception as exc:  # pragma: no cover - hardware specific
-            if not config.use_gpu:
+            if not use_gpu:
                 raise
             logger.warning(
                 "Failed to initialise faster-whisper on GPU, falling back to CPU: %s",
                 exc,
             )
             self._config.use_gpu = False
-            self._model = WhisperModel(config.model, device="cpu", compute_type="int8")
-        self._lock = asyncio.Lock()
+            return self._initialise_model(False)
+
+    def _ensure_cpu_model(self) -> None:
+        """Switch execution to CPU, reusing the helper for model creation."""
+
+        if self._config.use_gpu:
+            logger.warning("GPU inference failed, switching faster-whisper to CPU")
+        self._config.use_gpu = False
+        self._model = self._initialise_model(False)
 
     @property
     def model_name(self) -> str:
@@ -54,9 +67,9 @@ class SpeechToTextEngine:
         loop = asyncio.get_running_loop()
         async with self._lock:
             audio = np.frombuffer(pcm16, np.int16).astype(np.float32) / 32768.0
-            result = await loop.run_in_executor(
-                None,
-                lambda: list(
+
+            def _run_transcribe() -> list:
+                return list(
                     self._model.transcribe(
                         audio,
                         beam_size=self._config.beam_size,
@@ -67,8 +80,18 @@ class SpeechToTextEngine:
                         log_prob_threshold=-1.0,
                         initial_prompt=None,
                     )
-                ),
-            )
+                )
+
+            try:
+                result = await loop.run_in_executor(None, _run_transcribe)
+            except (RuntimeError, ValueError) as exc:
+                if not self._config.use_gpu:
+                    raise
+                logger.warning(
+                    "faster-whisper GPU inference failed (%s); retrying on CPU", exc
+                )
+                self._ensure_cpu_model()
+                result = await loop.run_in_executor(None, _run_transcribe)
         if not result:
             return ""
         transcript = " ".join(segment.text.strip() for segment in result if segment.text)
