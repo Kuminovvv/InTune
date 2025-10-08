@@ -67,11 +67,23 @@ class InterviewCopilot:
     async def start(self) -> None:
         if self._running:
             return
-        self._running = True
         self._buffer.clear()
         self._last_partial_timestamp = 0.0
-        await self._callbacks.on_state("listening", "")
-        self._audio.start()
+        try:
+            self._audio.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to start audio capture")
+            friendly = (
+                "Не удалось запустить захват аудио. "
+                "Проверьте выбранное в настройках loopback-устройство."
+            )
+            await self._callbacks.on_error("audio", str(exc))
+            await self._callbacks.on_state("error", friendly)
+            self._running = False
+            return
+
+        self._running = True
+        await self._callbacks.on_state("listening", "Ожидаю речь…")
         loop = asyncio.get_running_loop()
         self._consumer_task = loop.create_task(self._consume_frames())
 

@@ -22,6 +22,7 @@ class OverlayWindow(QtWidgets.QMainWindow):
         self._controller = controller
         self._is_listening = False
         self._settings_window: SettingsWindow | None = None
+        self._has_transcript = False
 
         self.setWindowTitle("Interview Copilot")
         self.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
@@ -45,7 +46,12 @@ class OverlayWindow(QtWidgets.QMainWindow):
         self.status_label.setFont(font)
         layout.addWidget(self.status_label)
 
-        self.partial_label = QtWidgets.QLabel("", self)
+        self.info_label = QtWidgets.QLabel("", self)
+        self.info_label.setWordWrap(True)
+        self.info_label.setStyleSheet("color: #f97316")
+        layout.addWidget(self.info_label)
+
+        self.partial_label = QtWidgets.QLabel("Собеседник: (ожидаю речь…)", self)
         self.partial_label.setWordWrap(True)
         self.partial_label.setStyleSheet("color: #a0a0a0")
         layout.addWidget(self.partial_label)
@@ -95,23 +101,37 @@ class OverlayWindow(QtWidgets.QMainWindow):
             "error": "Произошла ошибка",
         }
         self.status_label.setText(mapping.get(state, state))
+        if message:
+            self.info_label.setText(message)
+        else:
+            self.info_label.clear()
+
         if state == "listening":
             self._is_listening = True
+            self._has_transcript = False
             self.start_button.setText("Стоп")
+            self._set_listening_placeholder()
         elif state in {"ready", "error"}:
             self._is_listening = False
             self.start_button.setText("Начать")
-        if message:
-            self.partial_label.setText(message)
+            if state == "error" and not message:
+                self.info_label.setText("Проверьте настройки аудио и выберите loopback-устройство")
 
     def update_partial(self, text: str) -> None:
-        self.partial_label.setText(text)
+        self._has_transcript = True
+        self.info_label.clear()
+        if text:
+            self.partial_label.setText(f"Собеседник: {text}")
+        else:
+            self._set_listening_placeholder()
 
     def update_answer(self, question: str, hint: str) -> None:
         self.hint_edit.setPlainText(hint)
-        self.partial_label.setText(question)
+        self._has_transcript = True
+        self.partial_label.setText(f"Вопрос: {question}")
 
     def show_error(self, stage: str, message: str) -> None:
+        self.info_label.setText(f"Ошибка {stage}: {message}")
         QtWidgets.QMessageBox.critical(self, "Ошибка", f"{stage}: {message}")
 
     # ------------------------------------------------------------------
@@ -127,6 +147,10 @@ class OverlayWindow(QtWidgets.QMainWindow):
             self._controller.stop_listen()
         else:
             self._controller.start_listen()
+
+    def _set_listening_placeholder(self) -> None:
+        if not self._has_transcript:
+            self.partial_label.setText("Собеседник: (ожидаю речь…)")
 
 
 class SettingsWindow(QtWidgets.QDialog):
