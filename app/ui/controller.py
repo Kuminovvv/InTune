@@ -9,7 +9,7 @@ import logging
 import threading
 from concurrent.futures import Future
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, Signal
 
@@ -30,6 +30,7 @@ class CopilotController(QObject):
     errorOccurred = Signal(str, str)
     reindexFinished = Signal(int)
     configUpdated = Signal(dict)
+    coreReady = Signal()
 
     def __init__(self, config_path: Path):
         super().__init__()
@@ -40,6 +41,8 @@ class CopilotController(QObject):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._command_queue: Optional[asyncio.Queue[CommandPayload]] = None
         self._loop_ready = threading.Event()
+        self._pending: List[CommandPayload] = []
+        self._pending_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -48,14 +51,18 @@ class CopilotController(QObject):
         if self._thread.is_alive():
             return
         self._thread.start()
-        self._loop_ready.wait()
 
     def shutdown(self) -> None:
-        if not self._loop_ready.is_set():
+        if not self._thread.is_alive():
+            return
+        if not self._loop_ready.wait(timeout=0.1):
+            # Core still initialising; thread is daemon so it will exit with the process.
             return
         future = self._submit("shutdown")
-        future.result()
-        self._thread.join(timeout=5.0)
+        try:
+            future.result(timeout=5.0)
+        finally:
+            self._thread.join(timeout=5.0)
 
     # ------------------------------------------------------------------
     # Public API for the UI
@@ -111,8 +118,25 @@ class CopilotController(QObject):
             on_state=on_state,
             on_error=on_error,
         )
-        copilot = InterviewCopilot(self.current_config(), callbacks)
+        try:
+            copilot = InterviewCopilot(self.current_config(), callbacks)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to initialise copilot core")
+            self.errorOccurred.emit("init", str(exc))
+            self._loop_ready.set()
+            self.coreReady.emit()
+            return
+
         self._loop_ready.set()
+        self.coreReady.emit()
+        with self._pending_lock:
+            pending = list(self._pending)
+            self._pending.clear()
+        for item in pending:
+            await queue.put(item)
+
+        await asyncio.sleep(0)
+        self.statusChanged.emit("ready", "")
         logger.info("Copilot core thread started")
 
         while True:
@@ -168,13 +192,18 @@ class CopilotController(QObject):
             logger.exception("Failed to persist configuration to %s", self._config_path)
 
     def _submit(self, command: str, payload: Optional[Dict[str, Any]] = None) -> Future[Any]:
-        if not self._loop_ready.is_set() or self._loop is None or self._command_queue is None:
-            raise RuntimeError("Controller thread is not initialised")
         result: Future[Any] = Future()
+        payload = payload or {}
+
+        if not self._loop_ready.is_set() or self._loop is None or self._command_queue is None:
+            with self._pending_lock:
+                if not self._loop_ready.is_set() or self._loop is None or self._command_queue is None:
+                    self._pending.append((command, payload, result))
+                    return result
 
         async def enqueue() -> None:
             assert self._command_queue is not None
-            await self._command_queue.put((command, payload or {}, result))
+            await self._command_queue.put((command, payload, result))
 
         asyncio.run_coroutine_threadsafe(enqueue(), self._loop)
         return result
