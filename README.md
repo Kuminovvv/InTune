@@ -39,7 +39,9 @@ python -m intune.scripts.prepare_and_launch --audio path/to/audio.pcm
 
 Для большинства возможностей требуются дополнительные зависимости:
 
-- `sounddevice`, `faster-whisper`, `llama-cpp-python`, `chromadb`, `PySide6`, `cryptography`
+- `sounddevice`, `faster-whisper`, `llama-cpp-python`, `chromadb`, `PySide6`, `cryptography`, `loguru`
+
+При отсутствии `loguru` фреймворк логирования автоматически переключится на стандартный `logging` Python.
 
 Компоненты корректно работают даже при отсутствии части пакетов — включены
 защищённые фолбэки и подробные ошибки.
