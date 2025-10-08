@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -134,23 +134,23 @@ class AppConfig:
     def dump(self) -> Dict[str, Any]:
         """Return a JSON serialisable dict."""
 
+        rag_dict = asdict(self.rag)
+        rag_dict["db_path"] = str(rag_dict["db_path"])
+        rag_dict["index_path"] = str(rag_dict["index_path"])
+
+        logging_dict = asdict(self.logging)
+        if logging_dict["path"] is not None:
+            logging_dict["path"] = str(logging_dict["path"])
+
         return {
-            "audio": vars(self.audio),
-            "vad": vars(self.vad),
-            "stt": vars(self.stt),
-            "ollama": vars(self.ollama),
-            "overlay": vars(self.overlay),
-            "rag": {
-                "top_k": self.rag.top_k,
-                "db_path": str(self.rag.db_path),
-                "index_path": str(self.rag.index_path),
-                "embed_model": self.rag.embed_model,
-            },
+            "audio": asdict(self.audio),
+            "vad": asdict(self.vad),
+            "stt": asdict(self.stt),
+            "ollama": asdict(self.ollama),
+            "overlay": asdict(self.overlay),
+            "rag": rag_dict,
             "profile": self.profile,
-            "logging": {
-                "level": self.logging.level,
-                "path": str(self.logging.path) if self.logging.path else None,
-            },
+            "logging": logging_dict,
         }
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:

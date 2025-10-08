@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import asdict
 from typing import Dict, Iterable
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -377,7 +378,7 @@ class SettingsWindow(QtWidgets.QDialog):
 
         def worker() -> None:
             try:
-                capture = AudioCapturer(AudioConfig(**vars(config.audio)))
+                capture = AudioCapturer(AudioConfig(**asdict(config.audio)))
                 metrics = capture.test_capture(duration=2.0)
             except Exception as exc:  # noqa: BLE001
                 QtCore.QTimer.singleShot(

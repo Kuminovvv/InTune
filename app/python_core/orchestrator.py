@@ -7,7 +7,7 @@ import contextlib
 import logging
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Awaitable, Callable, Deque, Iterable, Optional
 
 import webrtcvad
@@ -41,10 +41,10 @@ class InterviewCopilot:
     def __init__(self, config: AppConfig, callbacks: CopilotCallbacks):
         self._config = config
         self._callbacks = callbacks
-        self._audio = AudioCapturer(AudioConfig(**vars(config.audio)))
+        self._audio = AudioCapturer(AudioConfig(**asdict(config.audio)))
         self._vad = webrtcvad.Vad(config.vad.aggressiveness)
-        self._stt = SpeechToTextEngine(SttConfig(**vars(config.stt)))
-        self._ollama = OllamaClient(OllamaConfig(**vars(config.ollama)))
+        self._stt = SpeechToTextEngine(SttConfig(**asdict(config.stt)))
+        self._ollama = OllamaClient(OllamaConfig(**asdict(config.ollama)))
         self._rag = KnowledgeStore(config.rag.db_path, config.rag.index_path, config.rag.embed_model)
         self._running = False
         self._consumer_task: Optional[asyncio.Task[None]] = None
@@ -240,7 +240,7 @@ class InterviewCopilot:
             was_running = self._running
             if was_running:
                 await self.stop()
-            self._audio = AudioCapturer(AudioConfig(**vars(self._config.audio)))
+            self._audio = AudioCapturer(AudioConfig(**asdict(self._config.audio)))
             if was_running:
                 await self.start()
         if rag_changed:
