@@ -43,10 +43,11 @@ def list_output_devices(predicate: Optional[DevicePredicate] = None) -> List[str
 
     devices: List[str] = []
     host_apis = sd.query_hostapis()
+    is_windows = platform.system().lower() == "windows"
     for device in sd.query_devices():
         if predicate and not predicate(device):
             continue
-        max_output = device.get("max_output_channels", 0)
+        max_output = int(device.get("max_output_channels", 0) or 0)
         if max_output <= 0:
             continue
         name = device.get("name", "")
@@ -54,9 +55,10 @@ def list_output_devices(predicate: Optional[DevicePredicate] = None) -> List[str
         if "loopback" in name.lower():
             devices.append(name)
             continue
-        if platform.system().lower() == "windows" and host_name.lower().startswith("wasapi"):
-            devices.append(name)
-        elif platform.system().lower() != "windows":
+        if is_windows:
+            if "wasapi" in host_name.lower():
+                devices.append(name)
+        else:
             devices.append(name)
     return sorted(dict.fromkeys(devices))
 
@@ -235,24 +237,107 @@ class AudioCapturer:
         logger.warning("Requested device '%s' not found, falling back to system default", self._config.device_name)
         return None
 
+    def _find_fallback_loopback_device(self, preferred_name: Optional[str] = None) -> Optional[int]:
+        try:
+            devices = list(sd.query_devices())
+            host_apis = sd.query_hostapis()
+        except Exception:  # noqa: BLE001
+            return None
+
+        preferred_lower = preferred_name.lower() if preferred_name else None
+        wasapi_indices: List[int] = []
+        loopback_indices: List[int] = []
+
+        for idx, device in enumerate(devices):
+            name = device.get("name", "")
+            host_name = host_apis[device.get("hostapi", 0)].get("name", "")
+            max_output = int(device.get("max_output_channels", 0) or 0)
+            if max_output <= 0:
+                continue
+
+            normalized_name = name.lower()
+            if preferred_lower and normalized_name == preferred_lower and "loopback" in normalized_name:
+                loopback_indices.append(idx)
+                continue
+
+            if "wasapi" in host_name.lower():
+                if preferred_lower and normalized_name == preferred_lower:
+                    wasapi_indices.insert(0, idx)
+                else:
+                    wasapi_indices.append(idx)
+            elif "loopback" in normalized_name:
+                loopback_indices.append(idx)
+
+        if wasapi_indices:
+            return wasapi_indices[0]
+        if loopback_indices:
+            return loopback_indices[0]
+        return None
+
     def _open_stream(self) -> None:
         device_index = self._resolve_device_index()
-        extra = self._extra_settings(device_index)
-        channels = self._effective_channels(device_index, extra)
-        self._active_channels = channels
-        self._active_device_signature = self._device_signature(device_index)
-        logger.info("Starting audio capture from %s", self._active_device_signature or "System Default")
-        self._stream = sd.RawInputStream(
-            samplerate=self._config.sample_rate,
-            blocksize=self._config.block_size,
-            device=device_index,
-            channels=channels,
-            dtype=self._config.dtype,
-            callback=self._on_audio,
-            finished_callback=self._on_stream_finished,
-            extra_settings=extra,
-        )
-        self._stream.start()
+        preferred_name: Optional[str] = None
+        if device_index is not None:
+            try:
+                preferred_name = sd.query_devices(device_index).get("name")
+            except Exception:  # noqa: BLE001
+                preferred_name = None
+
+        attempt_indices: List[Optional[int]] = [device_index]
+        fallback_index = self._find_fallback_loopback_device(preferred_name)
+        if fallback_index is not None and fallback_index not in attempt_indices:
+            attempt_indices.append(fallback_index)
+        if None not in attempt_indices:
+            attempt_indices.append(None)
+
+        last_error: Optional[Exception] = None
+        for candidate in attempt_indices:
+            extra = self._extra_settings(candidate)
+            try:
+                channels = self._effective_channels(candidate, extra)
+            except RuntimeError as error:
+                last_error = error
+                logger.warning(
+                    "Device %s is not suitable for loopback capture: %s",
+                    self._device_signature(candidate),
+                    error,
+                )
+                continue
+
+            try:
+                self._stream = sd.RawInputStream(
+                    samplerate=self._config.sample_rate,
+                    blocksize=self._config.block_size,
+                    device=candidate,
+                    channels=channels,
+                    dtype=self._config.dtype,
+                    callback=self._on_audio,
+                    finished_callback=self._on_stream_finished,
+                    extra_settings=extra,
+                )
+                self._stream.start()
+            except Exception as error:  # noqa: BLE001
+                last_error = error
+                logger.warning(
+                    "Failed to start audio stream with device %s: %s",
+                    self._device_signature(candidate),
+                    error,
+                )
+                if self._stream is not None:
+                    with contextlib.suppress(Exception):
+                        self._stream.close()
+                    self._stream = None
+                continue
+
+            self._active_channels = channels
+            self._active_device_signature = self._device_signature(candidate)
+            logger.info(
+                "Starting audio capture from %s",
+                self._active_device_signature or "System Default",
+            )
+            return
+
+        raise RuntimeError("Unable to initialise loopback audio stream") from last_error
 
     def _close_stream(self) -> None:
         if self._stream is None:
@@ -383,15 +468,45 @@ class AudioCapturer:
         frames: List[AudioMetrics] = []
         block_size = self._config.block_size
         device_index = self._resolve_device_index()
-        extra = self._extra_settings(device_index)
-        channels = self._effective_channels(device_index, extra)
+        fallback_index = self._find_fallback_loopback_device()
+        if fallback_index is not None and fallback_index != device_index:
+            attempt_order: List[Optional[int]] = [device_index, fallback_index]
+        else:
+            attempt_order = [device_index]
+        if None not in attempt_order:
+            attempt_order.append(None)
+
+        extra: Optional[sd.WasapiSettings] = None  # type: ignore[name-defined]
+        channels = max(1, self._config.channels)
+        chosen_device: Optional[int] = None
+        last_error: Optional[Exception] = None
+        for candidate in attempt_order:
+            candidate_extra = self._extra_settings(candidate)
+            try:
+                candidate_channels = self._effective_channels(candidate, candidate_extra)
+            except RuntimeError as error:
+                last_error = error
+                logger.debug(
+                    "Skipping device %s for test capture due to incompatible configuration: %s",
+                    self._device_signature(candidate),
+                    error,
+                )
+                continue
+            extra = candidate_extra
+            channels = candidate_channels
+            chosen_device = candidate
+            break
+
+        if chosen_device is None:
+            raise RuntimeError("Unable to resolve a suitable device for test capture") from last_error
+
         start_time = time.monotonic()
         with contextlib.ExitStack() as stack:
             stream = stack.enter_context(
                 sd.RawInputStream(
                     samplerate=self._config.sample_rate,
                     blocksize=block_size,
-                    device=device_index,
+                    device=chosen_device,
                     channels=channels,
                     dtype=self._config.dtype,
                     extra_settings=extra,
