@@ -28,8 +28,14 @@ intune/
 ## Запуск
 
 ```bash
-python -m intune.main path/to/audio.pcm --config config.yaml --mode Short
+python -m intune.scripts.prepare_and_launch --audio path/to/audio.pcm
 ```
+
+Скрипт создаст локальную конфигурацию `config.local.json`, подготовит каталоги
+для моделей, индексов и истории, проверит наличие опциональных зависимостей, а
+затем запустит пайплайн обработки для указанного аудио. Для ручного управления
+параметрами используйте флаги `--config`, `--mode`, `--sample-rate` и
+`--prepare-only`.
 
 Для большинства возможностей требуются дополнительные зависимости:
 
