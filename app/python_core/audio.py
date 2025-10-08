@@ -163,7 +163,7 @@ class AudioCapturer:
 
         return matching_indices[0]
 
-    def _effective_channels(self, device_index: Optional[int], extra: Optional[sd.WasapiSettings]) -> int:  # type: ignore[name-defined]
+    def _channel_options(self, device_index: Optional[int], extra: Optional[sd.WasapiSettings]) -> List[int]:  # type: ignore[name-defined]
         desired = max(1, self._config.channels)
 
         info: Optional[dict]
@@ -176,23 +176,35 @@ class AudioCapturer:
             info = None
 
         if not info:
-            return desired
+            return [desired]
 
         max_input = int(info.get("max_input_channels", 0) or 0)
         max_output = int(info.get("max_output_channels", 0) or 0)
 
+        options: List[int] = []
+
         if extra is not None and max_output > 0:
-            return max(1, max_output)
+            primary = max(1, min(desired, max_output))
+            options.append(primary)
+            if primary != max_output:
+                options.append(max_output)
 
         if max_input > 0:
-            return max(1, min(desired, max_input))
+            primary = max(1, min(desired, max_input))
+            if primary not in options:
+                options.append(primary)
+            if max_input not in options:
+                options.append(max_input)
+
+        if options:
+            return options
 
         if extra is None and max_output > 0:
             raise RuntimeError(
                 "Selected audio device does not expose input channels and does not support WASAPI loopback"
             )
 
-        return desired
+        return [desired]
 
     def _device_signature(self, device_index: Optional[int]) -> Optional[str]:
         if device_index is None:
@@ -294,7 +306,7 @@ class AudioCapturer:
         for candidate in attempt_indices:
             extra = self._extra_settings(candidate)
             try:
-                channels = self._effective_channels(candidate, extra)
+                channel_options = self._channel_options(candidate, extra)
             except RuntimeError as error:
                 last_error = error
                 logger.warning(
@@ -304,38 +316,40 @@ class AudioCapturer:
                 )
                 continue
 
-            try:
-                self._stream = sd.RawInputStream(
-                    samplerate=self._config.sample_rate,
-                    blocksize=self._config.block_size,
-                    device=candidate,
-                    channels=channels,
-                    dtype=self._config.dtype,
-                    callback=self._on_audio,
-                    finished_callback=self._on_stream_finished,
-                    extra_settings=extra,
-                )
-                self._stream.start()
-            except Exception as error:  # noqa: BLE001
-                last_error = error
-                logger.warning(
-                    "Failed to start audio stream with device %s: %s",
-                    self._device_signature(candidate),
-                    error,
-                )
-                if self._stream is not None:
-                    with contextlib.suppress(Exception):
-                        self._stream.close()
-                    self._stream = None
-                continue
+            for channels in channel_options:
+                try:
+                    self._stream = sd.RawInputStream(
+                        samplerate=self._config.sample_rate,
+                        blocksize=self._config.block_size,
+                        device=candidate,
+                        channels=channels,
+                        dtype=self._config.dtype,
+                        callback=self._on_audio,
+                        finished_callback=self._on_stream_finished,
+                        extra_settings=extra,
+                    )
+                    self._stream.start()
+                except Exception as error:  # noqa: BLE001
+                    last_error = error
+                    logger.warning(
+                        "Failed to start audio stream with device %s (%s ch): %s",
+                        self._device_signature(candidate),
+                        channels,
+                        error,
+                    )
+                    if self._stream is not None:
+                        with contextlib.suppress(Exception):
+                            self._stream.close()
+                        self._stream = None
+                    continue
 
-            self._active_channels = channels
-            self._active_device_signature = self._device_signature(candidate)
-            logger.info(
-                "Starting audio capture from %s",
-                self._active_device_signature or "System Default",
-            )
-            return
+                self._active_channels = channels
+                self._active_device_signature = self._device_signature(candidate)
+                logger.info(
+                    "Starting audio capture from %s",
+                    self._active_device_signature or "System Default",
+                )
+                return
 
         raise RuntimeError("Unable to initialise loopback audio stream") from last_error
 
@@ -479,11 +493,12 @@ class AudioCapturer:
         extra: Optional[sd.WasapiSettings] = None  # type: ignore[name-defined]
         channels = max(1, self._config.channels)
         chosen_device: Optional[int] = None
+        selected_stream: Optional[sd.RawInputStream] = None
         last_error: Optional[Exception] = None
         for candidate in attempt_order:
             candidate_extra = self._extra_settings(candidate)
             try:
-                candidate_channels = self._effective_channels(candidate, candidate_extra)
+                channel_options = self._channel_options(candidate, candidate_extra)
             except RuntimeError as error:
                 last_error = error
                 logger.debug(
@@ -492,26 +507,42 @@ class AudioCapturer:
                     error,
                 )
                 continue
-            extra = candidate_extra
-            channels = candidate_channels
-            chosen_device = candidate
-            break
 
-        if chosen_device is None:
+            for candidate_channels in channel_options:
+                try:
+                    stream = sd.RawInputStream(
+                        samplerate=self._config.sample_rate,
+                        blocksize=block_size,
+                        device=candidate,
+                        channels=candidate_channels,
+                        dtype=self._config.dtype,
+                        extra_settings=candidate_extra,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    last_error = error
+                    logger.debug(
+                        "Rejected device %s (%s ch) for test capture: %s",
+                        self._device_signature(candidate),
+                        candidate_channels,
+                        error,
+                    )
+                    continue
+
+                selected_stream = stream
+                extra = candidate_extra
+                channels = candidate_channels
+                chosen_device = candidate
+                break
+
+            if selected_stream is not None:
+                break
+
+        if selected_stream is None or chosen_device is None:
             raise RuntimeError("Unable to resolve a suitable device for test capture") from last_error
 
         start_time = time.monotonic()
         with contextlib.ExitStack() as stack:
-            stream = stack.enter_context(
-                sd.RawInputStream(
-                    samplerate=self._config.sample_rate,
-                    blocksize=block_size,
-                    device=chosen_device,
-                    channels=channels,
-                    dtype=self._config.dtype,
-                    extra_settings=extra,
-                )
-            )
+            stream = stack.enter_context(selected_stream)
             stream.start()
             if play_tone:
                 tone = self.generate_test_tone(duration=duration)
