@@ -96,9 +96,29 @@ class AudioCapturer:
     def config(self) -> AudioConfig:
         return self._config
 
-    def _extra_settings(self) -> Optional[sd.WasapiSettings]:  # type: ignore[name-defined]
+    def _extra_settings(self, device_index: Optional[int]) -> Optional[sd.WasapiSettings]:  # type: ignore[name-defined]
         if platform.system().lower() != "windows":
             return None
+
+        try:
+            if device_index is None:
+                info = sd.query_devices(None, "output")
+            else:
+                info = sd.query_devices(device_index)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to inspect audio device for WASAPI support", exc_info=True)
+            return None
+
+        host_index = info.get("hostapi", 0)
+        try:
+            host_name = sd.query_hostapis()[host_index].get("name", "")
+        except Exception:  # noqa: BLE001
+            host_name = ""
+
+        if "wasapi" not in host_name.lower():
+            logger.debug("Audio host '%s' does not support WASAPI loopback", host_name)
+            return None
+
         try:
             settings = sd.WasapiSettings()  # type: ignore[attr-defined]
         except AttributeError:
@@ -108,6 +128,7 @@ class AudioCapturer:
             # Some sounddevice builds expose WasapiSettings but without a public constructor.
             logger.debug("sounddevice.WasapiSettings cannot be constructed; falling back to default settings")
             return None
+
         try:
             settings.loopback = True  # type: ignore[attr-defined]
         except AttributeError:
@@ -155,8 +176,8 @@ class AudioCapturer:
         return None
 
     def _open_stream(self) -> None:
-        extra = self._extra_settings()
         device_index = self._resolve_device_index()
+        extra = self._extra_settings(device_index)
         self._active_device_signature = self._device_signature(device_index)
         logger.info("Starting audio capture from %s", self._active_device_signature or "System Default")
         self._stream = sd.RawInputStream(
