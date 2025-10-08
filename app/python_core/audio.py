@@ -204,6 +204,16 @@ class AudioCapturer:
             max_input = max(max_input, int(input_info.get("max_input_channels", 0) or 0))
         max_output = int(info.get("max_output_channels", 0) or 0)
 
+        device_name = info.get("name", "")
+        normalized_name = device_name.lower()
+        explicit_loopback = "loopback" in normalized_name
+        loopback_supported = extra is not None or explicit_loopback
+
+        if not loopback_supported:
+            raise RuntimeError(
+                "Selected audio device does not expose input channels and does not support WASAPI loopback"
+            )
+
         options: List[int] = []
 
         if extra is not None and max_output > 0:
@@ -212,7 +222,7 @@ class AudioCapturer:
             if primary != max_output:
                 options.append(max_output)
 
-        if max_input > 0:
+        if explicit_loopback and max_input > 0:
             primary = max(1, min(desired, max_input))
             if primary not in options:
                 options.append(primary)
@@ -221,11 +231,6 @@ class AudioCapturer:
 
         if options:
             return options
-
-        if extra is None and max_output > 0:
-            raise RuntimeError(
-                "Selected audio device does not expose input channels and does not support WASAPI loopback"
-            )
 
         return [desired]
 
