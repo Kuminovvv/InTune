@@ -42,12 +42,12 @@ class SpeechToTextEngine:
             return ""
         loop = asyncio.get_running_loop()
         async with self._lock:
+            audio = np.frombuffer(pcm16, np.int16).astype(np.float32) / 32768.0
             result = await loop.run_in_executor(
                 None,
                 lambda: list(
                     self._model.transcribe(
-                        np.frombuffer(pcm16, np.int16),
-                        sample_rate=sample_rate,
+                        audio,
                         beam_size=self._config.beam_size,
                         language=None if self._config.language == "auto" else self._config.language,
                         vad_filter=self._config.vad_filter,
