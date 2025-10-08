@@ -10,9 +10,14 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
-from ..app import create_app, handle_transcript
-from ..core.config import AppConfig, load_app_config
-from ..core.logger import configure_logging, logger
+if __package__ in {None, ""}:  # pragma: no cover - executed only when run as a script
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+
+from intune.app import create_app, handle_transcript
+from intune.core.config import AppConfig, load_app_config
+from intune.core.logger import configure_logging, logger
 
 
 OPTIONAL_DEPENDENCIES: Tuple[Tuple[str, str], ...] = (
