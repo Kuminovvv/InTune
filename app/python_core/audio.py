@@ -91,6 +91,7 @@ class AudioCapturer:
         self._monitor_thread: Optional[threading.Thread] = None
         self._active_device_signature: Optional[str] = None
         self._last_default_signature: Optional[str] = self._current_default_output_signature()
+        self._active_channels = max(1, config.channels)
 
     @property
     def config(self) -> AudioConfig:
@@ -136,6 +137,61 @@ class AudioCapturer:
             return None
         return settings
 
+    def _preferred_device_index(self, device_name: str) -> Optional[int]:
+        try:
+            devices = list(sd.query_devices())
+            host_apis = sd.query_hostapis()
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to enumerate audio devices when selecting preferred host", exc_info=True)
+            return None
+
+        matching_indices: List[int] = []
+        for idx, device in enumerate(devices):
+            if device.get("name") == device_name:
+                matching_indices.append(idx)
+
+        if not matching_indices:
+            return None
+
+        if platform.system().lower() == "windows":
+            for idx in matching_indices:
+                host_name = host_apis[devices[idx].get("hostapi", 0)].get("name", "")
+                if "wasapi" in host_name.lower():
+                    return idx
+
+        return matching_indices[0]
+
+    def _effective_channels(self, device_index: Optional[int], extra: Optional[sd.WasapiSettings]) -> int:  # type: ignore[name-defined]
+        desired = max(1, self._config.channels)
+
+        info: Optional[dict]
+        try:
+            if device_index is None:
+                info = sd.query_devices(None, "output")
+            else:
+                info = sd.query_devices(device_index)
+        except Exception:  # noqa: BLE001
+            info = None
+
+        if not info:
+            return desired
+
+        max_input = int(info.get("max_input_channels", 0) or 0)
+        max_output = int(info.get("max_output_channels", 0) or 0)
+
+        if extra is not None and max_output > 0:
+            return max(1, max_output)
+
+        if max_input > 0:
+            return max(1, min(desired, max_input))
+
+        if extra is None and max_output > 0:
+            raise RuntimeError(
+                "Selected audio device does not expose input channels and does not support WASAPI loopback"
+            )
+
+        return desired
+
     def _device_signature(self, device_index: Optional[int]) -> Optional[str]:
         if device_index is None:
             return self._current_default_output_signature()
@@ -162,15 +218,19 @@ class AudioCapturer:
                 default_info = None
             if default_info:
                 default_name = default_info.get("name")
-                for idx, device in enumerate(sd.query_devices()):
-                    if device.get("name") == default_name:
-                        return idx
+                if default_name:
+                    preferred = self._preferred_device_index(default_name)
+                    if preferred is not None:
+                        return preferred
             output_index = sd.default.device[1]
             if output_index is None or output_index < 0:
                 return None
             return int(output_index)
         for idx, device in enumerate(sd.query_devices()):
             if device.get("name") == self._config.device_name:
+                preferred = self._preferred_device_index(device.get("name", ""))
+                if preferred is not None:
+                    return preferred
                 return idx
         logger.warning("Requested device '%s' not found, falling back to system default", self._config.device_name)
         return None
@@ -178,13 +238,15 @@ class AudioCapturer:
     def _open_stream(self) -> None:
         device_index = self._resolve_device_index()
         extra = self._extra_settings(device_index)
+        channels = self._effective_channels(device_index, extra)
+        self._active_channels = channels
         self._active_device_signature = self._device_signature(device_index)
         logger.info("Starting audio capture from %s", self._active_device_signature or "System Default")
         self._stream = sd.RawInputStream(
             samplerate=self._config.sample_rate,
             blocksize=self._config.block_size,
             device=device_index,
-            channels=self._config.channels,
+            channels=channels,
             dtype=self._config.dtype,
             callback=self._on_audio,
             finished_callback=self._on_stream_finished,
@@ -200,6 +262,7 @@ class AudioCapturer:
         finally:
             self._stream.close()
             self._stream = None
+            self._active_channels = max(1, self._config.channels)
 
     def start(self) -> None:
         with self._lock:
@@ -264,10 +327,31 @@ class AudioCapturer:
             except Exception:  # noqa: BLE001
                 logger.exception("Auto-reconnect failed")
 
+    @staticmethod
+    def _downmix_to_mono(data: bytes, channels: int) -> bytes:
+        if channels <= 1 or not data:
+            return data
+        array = np.frombuffer(data, dtype=np.int16)
+        if array.size == 0:
+            return b""
+        try:
+            reshaped = array.reshape(-1, channels)
+        except ValueError:
+            usable = (array.size // channels) * channels
+            if usable == 0:
+                return b""
+            reshaped = array[:usable].reshape(-1, channels)
+        mono = reshaped.astype(np.int32).mean(axis=1)
+        mono = np.clip(mono, -32768, 32767).astype(np.int16)
+        return mono.tobytes()
+
     def _on_audio(self, indata: bytes, frames: int, _time: sd.CallbackFlags, status: sd.CallbackFlags) -> None:  # type: ignore[override]
         if status:
             logger.debug("Audio callback status: %s", status)
-        frame = CapturedFrame(data=bytes(indata), timestamp=time.monotonic())
+        pcm = self._downmix_to_mono(bytes(indata), self._active_channels)
+        if not pcm:
+            return
+        frame = CapturedFrame(data=pcm, timestamp=time.monotonic())
         try:
             self._queue.put_nowait(frame)
         except queue.Full:
@@ -298,8 +382,9 @@ class AudioCapturer:
 
         frames: List[AudioMetrics] = []
         block_size = self._config.block_size
-        extra = self._extra_settings()
         device_index = self._resolve_device_index()
+        extra = self._extra_settings(device_index)
+        channels = self._effective_channels(device_index, extra)
         start_time = time.monotonic()
         with contextlib.ExitStack() as stack:
             stream = stack.enter_context(
@@ -307,7 +392,7 @@ class AudioCapturer:
                     samplerate=self._config.sample_rate,
                     blocksize=block_size,
                     device=device_index,
-                    channels=self._config.channels,
+                    channels=channels,
                     dtype=self._config.dtype,
                     extra_settings=extra,
                 )
@@ -319,9 +404,10 @@ class AudioCapturer:
             try:
                 while time.monotonic() - start_time < duration:
                     data, _ = stream.read(block_size)
-                    array = np.frombuffer(data, dtype=np.int16)
-                    if array.size == 0:
+                    pcm = self._downmix_to_mono(bytes(data), channels)
+                    if not pcm:
                         continue
+                    array = np.frombuffer(pcm, dtype=np.int16)
                     rms = float(np.sqrt(np.mean(np.square(array.astype(np.float32))))) / 32768.0
                     peak = float(np.max(np.abs(array))) / 32768.0
                     frames.append(AudioMetrics(rms=rms, peak=peak))
