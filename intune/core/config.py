@@ -7,7 +7,7 @@ surprises and keep defaults easy to reason about.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -130,10 +130,13 @@ def _merge_dataclass(instance: Any, values: Dict[str, Any]) -> None:
         if not hasattr(instance, field_name):
             raise ValueError(f"Неизвестный параметр конфигурации: {field_name}")
         attr = getattr(instance, field_name)
-        if hasattr(attr, "__dataclass_fields__") and isinstance(field_value, dict):
+        if is_dataclass(attr) and isinstance(field_value, dict):
             _merge_dataclass(attr, field_value)
         else:
-            setattr(instance, field_name, field_value)
+            if isinstance(attr, Path):
+                setattr(instance, field_name, Path(field_value))
+            else:
+                setattr(instance, field_name, field_value)
 
 
 def load_app_config(path: Optional[Path] = None) -> AppConfig:

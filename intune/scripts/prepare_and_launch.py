@@ -91,7 +91,7 @@ def _prepare_filesystem(config: AppConfig) -> None:
 
     _ensure_parent(key_path)
     try:
-        from ..infra.security.crypto import SecretBox
+        from intune.infra.security.crypto import SecretBox
     except Exception:
         logger.warning("Модуль cryptography недоступен — ключ шифрования не создан")
     else:
@@ -100,7 +100,7 @@ def _prepare_filesystem(config: AppConfig) -> None:
 
 def _ensure_history_schema(config: AppConfig) -> None:
     try:
-        from ..infra.storage.sqlite import SQLiteHistoryRepository
+        from intune.infra.storage.sqlite import SQLiteHistoryRepository
     except Exception as exc:  # pragma: no cover - sqlite входит в стандартную библиотеку
         logger.error("Не удалось инициализировать хранилище истории: %s", exc)
         return
