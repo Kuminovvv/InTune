@@ -100,10 +100,20 @@ class AudioCapturer:
         if platform.system().lower() != "windows":
             return None
         try:
-            return sd.WasapiSettings(loopback=True)  # type: ignore[attr-defined]
+            settings = sd.WasapiSettings()  # type: ignore[attr-defined]
         except AttributeError:
             logger.debug("sounddevice.WasapiSettings is not available; falling back to default settings")
             return None
+        except TypeError:
+            # Some sounddevice builds expose WasapiSettings but without a public constructor.
+            logger.debug("sounddevice.WasapiSettings cannot be constructed; falling back to default settings")
+            return None
+        try:
+            settings.loopback = True  # type: ignore[attr-defined]
+        except AttributeError:
+            logger.debug("sounddevice.WasapiSettings.loopback attribute missing; using default settings")
+            return None
+        return settings
 
     def _device_signature(self, device_index: Optional[int]) -> Optional[str]:
         if device_index is None:
